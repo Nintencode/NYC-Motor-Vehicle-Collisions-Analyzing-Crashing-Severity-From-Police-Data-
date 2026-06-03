@@ -1,0 +1,1997 @@
+# Importing the data
+
+Installing needed packages
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+library(readxl)
+library(dplyr)
+install.packages("openxlsx", repos = "https://cran.rstudio.com/")
+library(openxlsx)
+install.packages("writexl", repos = "https://cran.rstudio.com/")
+library(writexl)
+install.packages("tidygeocoder", repos = "https://cran.rstudio.com/")
+library(tidygeocoder)
+```
+
+Give an overview of dataset.
+
+```{r}
+setwd("C:/Users/knigh/Downloads/Submission/Submission")
+collisions = read_xlsx("Motor_Vehicle_Collisions-500K.xlsx")
+```
+
+# Exploring The Data
+
+Looking at the structure of the data.
+
+```{r}
+str(collisions)
+```
+
+29 variables in Total- 2 POSIXct date features, 15 character features, 12 numeric features.
+
+Taking a closer look at the **POSIX variables**
+
+```{r}
+summary(collisions[c("CRASH.DATE", "CRASH.TIME")])
+```
+
+Can see range of time is from 1/1/2020 - 12/30/2024. The time range is full 24 hours. The 1899-12-31 component is a common place holder for when time is stored separately from the date, using 00:00:00 on 1899-12-31 as a default date.
+
+Checking if these columns have any NAs. If no NA's we will likely combine the two columns together to form a CRASH.DATE_TIME feature. **Transformation steps will occur after reviewing all columns to ensure big picture is understood before altering the data.**
+
+```{r}
+colSums(is.na(collisions[, c("CRASH.DATE", "CRASH.TIME")]))
+```
+
+No NAs are found in these columns. GOOD NEWS!
+
+Looking at the distribution of time through the years
+
+```{r}
+sum(format(collisions$CRASH.DATE, "%Y") == "2024")
+sum(format(collisions$CRASH.DATE, "%Y") == "2023")
+sum(format(collisions$CRASH.DATE, "%Y") == "2022")
+sum(format(collisions$CRASH.DATE, "%Y") == "2021")
+```
+
+Note that there is not many records from 2024 even though the range of the of the data covers up to 12/30/24.
+
+Now looking at the summaries of our **numeric columns**, starting with the **location features**.
+
+```{r}
+summary(collisions[c("ZIP.CODE", "LATITUDE","LONGITUDE")])
+```
+
+Since Zipcode, Latitude, and Longitude represent locations, summary statistics like mean, min, max, and quartiles are not particularly useful for interpretation. Additionally, the 0 values in Latitude and Longitude likely indicate missing data, as our dataset focuses on New York, where valid coordinates should not be (0,0). The most meaningful insights from summarizing these features include the count of missing values (NAs) and the median Zipcode, which may indicate where a significant number of crashes occur. However, a large number of missing values in these columns could impact the reliability of location-based analysis
+
+Looking for 0's in Lat and Long as they are probably representing missing values as well.
+
+```{r}
+colSums(collisions[, c("LATITUDE", "LONGITUDE")] == 0, na.rm = TRUE)
+```
+
+These 0 values stack on top of the NA count for the columns above.
+
+Additionally zipcode 10000 shown as the MIN is not a zipcode in New York. However 10001 is. Weird I know. I looked at these manually by ascending the data on table window, thankfully there is not many of these and they all align with Manahattan. Thank goodness. For any other inconsistent zipcodes, we may need to do some research.
+
+Now looking into Number of **people injured.**
+
+```{r}
+summary(collisions[c("NUMBER.OF.PERSONS.INJURED", "NUMBER.OF.PEDESTRIANS.INJURED","NUMBER.OF.CYCLIST.INJURED", "NUMBER.OF.MOTORIST.INJURED")])
+```
+
+There is only 1 NA in all these columns, that is great news! We'll just remove this record in the cleaning stage. Note that most of the statistics are 0, meaning most collisons did not have any injuries. When predicting crash severity this will probably create some class imbalance.
+
+From the website we know that Number of Persons injured should match the combined total of pedestrians, cyclist, and motorist. We want to confirm this by adding up the three columns (pedestrians, cyclist, and motorist) and seeing where it does not align with Number of Persons.
+
+```{r}
+mismatch_indexes = which((collisions$NUMBER.OF.PEDESTRIANS.INJURED + 
+                           collisions$NUMBER.OF.CYCLIST.INJURED + 
+                           collisions$NUMBER.OF.MOTORIST.INJURED) != collisions$NUMBER.OF.PERSONS.INJURED)
+
+mismatch_count = length(mismatch_indexes)
+
+mismatch_count
+```
+
+We are seeing 7496 records not align with the Number of Persons. This is a relatively small amount in our data of 500k records, 1.6%, so we may just remove these when cleaning.
+
+Now looking at number of **people killed**
+
+```{r}
+summary(collisions[c("NUMBER.OF.PERSONS.KILLED","NUMBER.OF.PEDESTRIANS.KILLED","NUMBER.OF.CYCLIST.KILLED", "NUMBER.OF.MOTORIST.KILLED")])
+```
+
+Again many more 0's and very low averages meaning not many people were killed in the crashes recorded. Signifying further class imbalance for our classifier models. No NA's here!!
+
+The pedestrians, cyclists, and motorist should also align with number of persons killed. Checking again to see consistency in the totals.
+
+```{r}
+mismatch_indexes2 = which((collisions$NUMBER.OF.PEDESTRIANS.KILLED + 
+                           collisions$NUMBER.OF.CYCLIST.KILLED + 
+                           collisions$NUMBER.OF.MOTORIST.KILLED) != collisions$NUMBER.OF.PERSONS.KILLED)
+
+mismatch_count2 = length(mismatch_indexes2)
+
+mismatch_count2
+```
+
+Thankfully we only have 49 misalignment here. We can definitely remove these in the cleaning stage.
+
+For the numeric column **Collision ID.** There is no need to check the summary as this is a unique identifier, giving little information for overall statistics. The main thing is that all collision IDs should be distinct.
+
+```{r}
+n_distinct(collisions$COLLISION_ID)
+```
+
+There are 472244 unique IDs, and there are 472244 records in our data. They are all distinct! :)
+
+------------------------------------------------------------------------
+
+Now to review the **character features**, we will start by looking at the **location columns**
+
+Looking at the number of NA's per column
+
+```{r}
+collisions %>%
+  summarise(across(c(BOROUGH, LOCATION, ON.STREET.NAME, CROSS.STREET.NAME, OFF.STREET.NAME), ~ sum(is.na(.)))) %>%
+  t()
+```
+
+We have ALOT of NA's in these columns.
+
+Now looking at the distinct values
+
+```{r}
+collisions %>%
+  summarise(across(c(BOROUGH, LOCATION, ON.STREET.NAME, CROSS.STREET.NAME, OFF.STREET.NAME), ~ n_distinct(.x, na.rm = TRUE))) %>%
+  t()
+```
+
+Above is all the distinct values in the columns, with NA's removed. Borough shows the number 5, which is what we would expect as there are 5 boroughs in NYC. These other features have alot of unique values, which is also to be expected as they define the specific location of crashes.
+
+Reviewing the mode
+
+```{r}
+#Borough
+temp = table(collisions$BOROUGH)
+temp[which.max(table(collisions$BOROUGH))]
+#Location
+temp = table(collisions$LOCATION)
+temp[which.max(table(collisions$LOCATION))]
+#On Street
+temp = table(collisions$ON.STREET.NAME)
+temp[which.max(table(collisions$ON.STREET.NAME))]
+#Cross Street
+temp = table(collisions$CROSS.STREET.NAME)
+temp[which.max(table(collisions$CROSS.STREET.NAME))]
+#Off Street
+temp = table(collisions$OFF.STREET.NAME)
+temp[which.max(table(collisions$OFF.STREET.NAME))]
+```
+
+Here we can see the most common crash borough is Brooklyn(However this is before replacing NA's). The column Location, is expected to have many unique combinations as it is coordinates, (0,0) is basically an NA, so it is difficult to find the mode for this one. The last 3 show streets with the most common accidents.
+
+Next reviewing the **Contributing factors.** There are multiple contributing factor columns that show if a crash had multiple reasons for occurring.
+
+Starting with the NA's.
+
+```{r}
+collisions %>%
+  summarise(across(c(CONTRIBUTING.FACTOR.VEHICLE.1, CONTRIBUTING.FACTOR.VEHICLE.2, CONTRIBUTING.FACTOR.VEHICLE.3, CONTRIBUTING.FACTOR.VEHICLE.4, CONTRIBUTING.FACTOR.VEHICLE.5), ~ sum(is.na(.)))) %>%
+  t()
+```
+
+The NA's increase throughout factors 1-5. Showing that almost all crashes have at least 1 factor, about 77% of crashes had two factors, and less than 1% have 3 factors or more.
+
+How many factors are distinct?
+
+```{r}
+collisions %>%
+  summarise(across(c(CONTRIBUTING.FACTOR.VEHICLE.1, CONTRIBUTING.FACTOR.VEHICLE.2, CONTRIBUTING.FACTOR.VEHICLE.3, CONTRIBUTING.FACTOR.VEHICLE.4, CONTRIBUTING.FACTOR.VEHICLE.5), ~ n_distinct(.x, na.rm = TRUE))) %>%
+  t()
+```
+
+There appears to be a lot of repetition in the factors, which is good! we will have to check if they are the same across all columns. Since they are a low number, we may be able to do this manually.
+
+Now reviewing the mode.
+
+```{r}
+#Factor 1
+temp = table(collisions$CONTRIBUTING.FACTOR.VEHICLE.1)
+temp[which.max(table(collisions$CONTRIBUTING.FACTOR.VEHICLE.1))]
+#Factor 2
+temp = table(collisions$CONTRIBUTING.FACTOR.VEHICLE.2)
+temp[which.max(table(collisions$CONTRIBUTING.FACTOR.VEHICLE.2))]
+#Factor 3
+temp = table(collisions$CONTRIBUTING.FACTOR.VEHICLE.3)
+temp[which.max(table(collisions$CONTRIBUTING.FACTOR.VEHICLE.3))]
+#Factor 4
+temp = table(collisions$CONTRIBUTING.FACTOR.VEHICLE.4)
+temp[which.max(table(collisions$CONTRIBUTING.FACTOR.VEHICLE.4))]
+#Factor 5
+temp = table(collisions$CONTRIBUTING.FACTOR.VEHICLE.5)
+temp[which.max(table(collisions$CONTRIBUTING.FACTOR.VEHICLE.5))]
+```
+
+Well this is not great. Looks like we have alot of unspecified reasons. Seeing as most of the Factor 2, 3, 4 and 5 is unspecified, this builds a good case to remove them. Doing the math of subtracting the \# of NA's from the total rows, I see we have 364,514 Factor 2 columns that are not NA, out of that 309314 is unspecified..thats 85%. It just gets worse for Factors 3, 4, and 5. So it appears these extra columns do not offer much information.
+
+Looking at what the top 10 factors are for CONTRIBUTING.FACTOR.VEHICLE.1, the most informative column.
+
+```{r}
+head(sort(table(collisions$CONTRIBUTING.FACTOR.VEHICLE.1), decreasing = TRUE), 10)
+
+```
+
+Looking at **Vehicle Type**. Like contributing factor, vehicle type has multiple columns for all cars involved.
+
+Exploring NA's.
+
+```{r}
+collisions %>%
+  summarise(across(c(VEHICLE.TYPE.CODE.1,VEHICLE.TYPE.CODE.2,VEHICLE.TYPE.CODE.3, VEHICLE.TYPE.CODE.4, VEHICLE.TYPE.CODE.5), ~ sum(is.na(.)))) %>%
+  t()
+```
+
+Similar to the contributing factors the NA's increase with additional vehicles. Showing most crashes have a listed vehicle, 67% of crashes have 2 vehicles listed, and less than 1% has 3 or more vehicles.
+
+Let's see how many distinct values there are.
+
+```{r}
+collisions %>%
+  summarise(across(c(VEHICLE.TYPE.CODE.1,VEHICLE.TYPE.CODE.2,VEHICLE.TYPE.CODE.3, VEHICLE.TYPE.CODE.4, VEHICLE.TYPE.CODE.5), ~ n_distinct(.x, na.rm = TRUE))) %>%
+  t()
+```
+
+There are MANY distinct vehicles listed. Probably meaning either the vehicles are very specific or poor recording on NYC's end.
+
+Below is the mode of these columns
+
+```{r}
+#Vehicle Type 1
+temp = table(collisions$VEHICLE.TYPE.CODE.1)
+temp[which.max(table(collisions$VEHICLE.TYPE.CODE.1))]
+#Vehicle Type 2
+temp = table(collisions$VEHICLE.TYPE.CODE.2)
+temp[which.max(table(collisions$VEHICLE.TYPE.CODE.2))]
+#Vehicle Type 3
+temp = table(collisions$VEHICLE.TYPE.CODE.3)
+temp[which.max(table(collisions$VEHICLE.TYPE.CODE.3))]
+#Vehicle Type 4
+temp = table(collisions$VEHICLE.TYPE.CODE.4)
+temp[which.max(table(collisions$VEHICLE.TYPE.CODE.4))]
+#Vehicle Type 5
+temp = table(collisions$VEHICLE.TYPE.CODE.5)
+temp[which.max(table(collisions$VEHICLE.TYPE.CODE.5))]
+```
+
+The most common crashes appear to be Sedan cars.
+
+# Processing Data
+
+Now that we have gotten a good look at our columns lets start to address some of the issues we uncovered.
+
+## Handling NA's
+
+Building an NA table for all features
+
+```{r}
+#building the empty table
+num_of_records = nrow(collisions) # Will used later in calculating the % of missing values
+num_of_features = ncol(collisions) #will use to create an empty table
+data_summary = as.data.frame(matrix(nrow=num_of_features,ncol = 3))
+#num_of_features is used for nrow so that each row in our created data frame aligns with an attribute from our dataset. 
+
+#Adding column names
+colnames(data_summary) = c("Features", "Missing Values", "% of Missing Values")
+
+#Adding Features
+data_summary[ ,1] = colnames(collisions)
+
+#Calculating number of NA's and There percentages
+for(i in 1:num_of_features){
+  data_summary[i,2] = sum(is.na(collisions[,i])) #counting the number of missing values in each cust_info attribute
+  data_summary[i,3] = round(100*(sum(is.na(collisions[,i])/num_of_records)),2) #turning the count into a percentage
+}
+
+print(data_summary)
+```
+
+**Vehicle Type**
+
+We remove vehicle type code 3, 4, and 5 features because they don't provide much information.
+
+```{r}
+# Vehicle Type features: remove columns with high % of missing values
+collisions_clean <- collisions %>% select(-VEHICLE.TYPE.CODE.3, -VEHICLE.TYPE.CODE.4, -VEHICLE.TYPE.CODE.5)
+```
+
+removing NA's in type 1 and setting the remaining NA's in type 2 to 'none'
+
+```{r}
+# Vehicle Type Code 1: remove NA's
+collisions_clean <- collisions_clean[!is.na(collisions_clean$VEHICLE.TYPE.CODE.1),]
+# Replacing NA's in vehicle type code 2 with "none"
+collisions_clean <- collisions_clean %>%
+  mutate(VEHICLE.TYPE.CODE.2 = replace(VEHICLE.TYPE.CODE.2, 
+                                       is.na(VEHICLE.TYPE.CODE.2), 
+                                       "none"))
+```
+
+**Contributing Factor**
+
+We remove contributing factor vehicle 3, 4, and 5 features because they don't provide much information.
+
+```{r}
+# Contributing Factor features:remove columns with high % of missing values
+collisions_clean <- collisions_clean %>% select(-CONTRIBUTING.FACTOR.VEHICLE.3, -CONTRIBUTING.FACTOR.VEHICLE.4, -CONTRIBUTING.FACTOR.VEHICLE.5)
+```
+
+removing NA's in factor 1 and setting the remaining NA's in factor 2 to 'none'
+
+```{r}
+# Contributing Factor Vehicle  1: remove NA's
+collisions_clean <- collisions_clean[!is.na(collisions_clean$CONTRIBUTING.FACTOR.VEHICLE.1), ]
+# Replacing NA's in contributing factor vehicle 2 with "none"
+collisions_clean <- collisions_clean <- collisions_clean %>%
+  mutate(CONTRIBUTING.FACTOR.VEHICLE.2 = replace(CONTRIBUTING.FACTOR.VEHICLE.2, 
+                                       is.na(CONTRIBUTING.FACTOR.VEHICLE.2), 
+                                       "none"))
+```
+
+**Injured/Fatalities**
+
+We remove injured/killed pedestrian, cyclists, and motorist columns because it provides redundant information and we want to focus our analysis on the total persons injured/killed.
+
+```{r}
+# number of injured/killed features: remove columns pedestrian, cyclists, motorist columns
+collisions_clean <- collisions_clean %>% select(-NUMBER.OF.PEDESTRIANS.INJURED, -NUMBER.OF.PEDESTRIANS.KILLED, -NUMBER.OF.CYCLIST.INJURED, -NUMBER.OF.CYCLIST.KILLED, -NUMBER.OF.MOTORIST.INJURED, -NUMBER.OF.MOTORIST.KILLED)
+```
+
+Removing the 1 NA in persons injured column.
+
+```{r}
+# remove the 1 NA form number of persons injured
+collisions_clean <- collisions_clean[!is.na(collisions_clean$NUMBER.OF.PERSONS.INJURED), ]
+```
+
+Looking to confirm NA's have been removed
+
+```{r}
+#building the empty table
+num_of_records = nrow(collisions_clean) # Will used later in calculating the % of missing values
+num_of_features = ncol(collisions_clean) #will use to create an empty table
+data_summary = as.data.frame(matrix(nrow=num_of_features,ncol = 3))
+#num_of_features is used for nrow so that each row in our created data frame aligns with an attribute from our dataset. 
+
+#Adding column names
+colnames(data_summary) = c("Features", "Missing Values", "% of Missing Values")
+
+#Adding Features
+data_summary[ ,1] = colnames(collisions_clean)
+
+#Calculating number of NA's and There percentages
+for(i in 1:num_of_features){
+  data_summary[i,2] = sum(is.na(collisions_clean[,i])) #counting the number of missing values in each cust_info attribute
+  data_summary[i,3] = round(100*(sum(is.na(collisions_clean[,i])/num_of_records)),2) #turning the count into a percentage
+}
+
+print(data_summary)
+```
+
+```{r}
+# write.csv(collisions_clean, "C:/Users/knigh/Documents/UHD MSDA/CS 5310 Data Mining/Project/collision_clean.csv", row.names = FALSE)
+# This is part of our process.
+```
+
+------------------------------------------------------------------------
+
+### Locations Data Cleaning and Geomapping Process Overview
+
+For the analysis of motor vehicle collisions in NYC, only the BOROUGH and ZIP.CODE columns were retained to represent location information. LATITUDE, LONGITUDE, LOCATION, and street-related columns (ON.STREET.NAME, CROSS.STREET.NAME, and OFF.STREET.NAME) were excluded due to their high number of unique values, which would hinder effective modeling. The primary focus is on identifying broader patterns across boroughs rather than hyper-localized street-level analysis.
+
+#### Handling Missing Location Data
+
+A large number of missing values were present in the BOROUGH and ZIP.CODE columns. To address this, reverse geocoding was performed using ArcGIS to extract addresses, ZIP codes and borough names based on LATITUDE and LONGITUDE. This geocoding process is time-consuming (over 2 hours). To streamline further analysis and report generation, the corresponding code has been commented out, and the most recent output file is used instead.
+
+After geocoding, some rows still lacked ZIP code or BOROUGH information. These cases were manually reviewed and updated using online sources based on available address data. The final version of collisions_borough_zipcode_4.9.25.xlsx includes these manual corrections and is used to supplement missing location values in the main dataset by joining on COLLISION_ID.
+
+#### Mapping and Cleaning Steps
+
+1.  Mapping Missing BOROUGH and ZIP.CODE:
+
+    -   collisions_clean_4.9.25.xlsx was merged with collisions_borough_zipcode_4.9.25.xlsx using a left join on COLLISION_ID.
+
+    -   Missing BOROUGH and ZIP.CODE values were filled using the new dataset.
+
+    -   The updated dataset was saved as collisions_clean_4.9.25_2.xlsx.
+
+2.  Final Cleaning:
+
+    -   Removed unnecessary location columns: LATITUDE, LONGITUDE, LOCATION, ON.STREET.NAME, CROSS.STREET.NAME, and OFF.STREET.NAME.
+
+    -   Removed rows with:
+
+        -   Missing BOROUGH or ZIP.CODE values, or
+
+        -   BOROUGH not among the five NYC boroughs: BRONX, MANHATTAN, QUEENS, BROOKLYN, STATEN ISLAND.
+
+3.  Final cleaned dataset saved as collisions_clean_4.9.25_3.xlsx.
+
+------------------------------------------------------------------------
+
+#### Install packages
+
+```{r}
+# install.packages("readxl")
+# install.packages("dplyr")
+# install.packages("openxlsx")
+# install.packages("writexl")
+# install.packages("tidygeocoder")
+# install.packages("remotes")
+#remotes::install_github("jessecambon/tidygeocoder")
+```
+
+#### Load Necessary Libraries
+
+```{r, echo=FALSE}
+# library(readxl)
+# library(dplyr)
+# library(openxlsx)
+# library(writexl)
+# library(tidygeocoder)
+```
+
+------------------------------------------------------------------------
+
+#### Part 1
+
+#### Load Datasets for Extracting Address, BOROUGH, and ZIP.CODE Based on Latitude and Longitude for Missing BOROUGH and ZIP.CODE Values
+
+```{r}
+## Load  coordinates data
+#coordinates <- read_excel("Motor_Vehicle_Collisions-500K.xlsx")
+
+## Reverse Geocode using ArcGIS and extract address components, including ZIP code
+#coordinates <- coordinates %>%
+#  reverse_geocode(lat = LATITUDE, long = LONGITUDE, method = 'arcgis') %>%
+#  mutate(
+#    ZIP.CODE = address_components$zip  # Extract ZIP code from address components
+#  )
+
+## Map County to NYC Borough
+#coordinates <- coordinates %>%
+#  mutate(
+#    Borough = case_when(
+#     grepl("New York County", address, ignore.case = TRUE) ~ "MANHATTAN",
+#      grepl("Kings County", address, ignore.case = TRUE) ~ "BROOKLYN",
+#      grepl("Queens County", address, ignore.case = TRUE) ~ "QUEENS",
+#      grepl("Bronx County", address, ignore.case = TRUE) ~ "BRONX",
+#      grepl("Richmond County", address, ignore.case = TRUE) ~ "STATEN ISLAND",
+#      TRUE ~ "Other"
+#    )
+#  )
+
+## Export dataframe with extracted address, boroughs, and ZIP code
+#write_xlsx(coordinates, "collisions_borough_zipcode_4.9.25.xlsx")
+```
+
+The updated code uses reverse geocoding with ArcGIS to convert latitude and longitude into addresses and extract the ZIP code from the address components. It then maps the county name found in the address to the corresponding NYC borough. The ZIP code is extracted from the address_components\$zip field, and both the borough and ZIP code are added to the dataset. Finally, the updated dataset, which now includes the address, borough, and ZIP code, is saved as "collisions_borough_zipcode_4.9.25.xlsx".
+
+------------------------------------------------------------------------
+
+#### Part 2
+
+#### Load Datasets for Mapping Completed BOROUGH and ZIP.CODE
+
+```{r}
+## Load datasets
+#collisions_clean_4.9.25 <- read_excel("collisions_clean_4.9.25.xlsx") 
+## This dataset contains cleaned data after removing NAs from NUMBER.OF.PERSONS, 
+## CONTRIBUTING.FACTOR.VEHICLE, VEHICLE.TYPE.CODE.1, and VEHICLE.TYPE.CODE.2.
+
+#collisions_borough_zipcode_4.9.25 <- read_excel("collisions_borough_zipcode_4.9.25.xlsx") 
+# This dataset contains completed BOROUGH and ZIP.CODE values for mapping.
+```
+
+```{r}
+# Join datasets based on COLLISION_ID
+#merged_collisions <- left_join(collisions_clean_4.9.25, 
+#                               collisions_borough_zipcode_4.9.25, 
+#                               by = "COLLISION_ID", 
+#                               suffix = c("", "_new"))
+
+# Update BOROUGH and ZIP.CODE only where missing
+#merged_collisions <- merged_collisions %>%
+#  mutate(
+#    BOROUGH = ifelse(is.na(BOROUGH), BOROUGH_new, BOROUGH),
+#    ZIP.CODE = ifelse(is.na(ZIP.CODE), ZIP.CODE_new, ZIP.CODE)
+#  ) %>%
+#  select(-BOROUGH_new, -ZIP.CODE_new)  # Drop extra columns
+
+# Reorder columns to match original dataset
+#merged_collisions <- merged_collisions %>% select(names(collisions_clean_4.9.25))
+
+# Save the final merged dataset
+#collisions_clean_4.9.25_2 <- write_xlsx(merged_collisions, "collisions_clean_4.9.25_2.xlsx")
+
+```
+
+Missing BOROUGH and ZIP.CODE values in collision_clean_4.9.25 were filled by mapping information from collisions_borough_zipcode_4.9.25 based on matching COLLISION_ID. The final clean dataset was exported for future use.
+
+------------------------------------------------------------------------
+
+#### Part 3
+
+#### Remove Unnecessary Columns and Rows from *`collisions_clean_4.9.25_2`*
+
+Remove columns: LATITUDE, LONGITUDE, LOCATION, ON.STREET.NAME, CROSS.STREET.NAME, OFF.STREET.NAME
+
+Rows Removed: Any rows with missing BOROUGH or ZIP.CODE, OR BOROUGH not in: BRONX, MANHATTAN, QUEENS, BROOKLYN, STATEN ISLAND
+
+```{r}
+## Read in cleaned dataset
+#collisions_clean_4.9.25_2 <- read_excel("collisions_clean_4.9.25_2.xlsx")
+
+## Step 1: Delete unnecessary columns
+#collisions_clean_4.9.25_2 <- collisions_clean_4.9.25_2 %>%
+#  select(-LATITUDE, -LONGITUDE, -LOCATION, 
+#         -ON.STREET.NAME, -CROSS.STREET.NAME, -OFF.STREET.NAME)
+
+## Step 2: Filter out rows where:
+## - BOROUGH or ZIP.CODE is missing (NA or empty string)
+## - BOROUGH is not one of the 5 boroughs
+
+#valid_boroughs <- c("BRONX", "MANHATTAN", "QUEENS", "BROOKLYN", "STATEN ISLAND")
+
+#collisions_clean_4.9.25_2 <- collisions_clean_4.9.25_2 %>%
+#  filter(!is.na(BOROUGH) & BOROUGH != "",
+#         !is.na(ZIP.CODE) & ZIP.CODE != "",
+#         BOROUGH %in% valid_boroughs)
+
+# Save the final cleaned dataset
+#write_xlsx(collisions_clean_4.9.25_2, "collisions_clean_4.9.25_3.xlsx")
+```
+
+------------------------------------------------------------------------
+
+#### Check NA
+
+```{r}
+## Read in cleaned dataset
+#collisions_clean_4.9.25_3 <- read_excel("collisions_clean_4.9.25_3.xlsx")
+
+## Check the number of NA values in each column of the dataset
+#na_count <- colSums(is.na(collisions_clean_4.9.25_3))
+
+## Print the NA counts for each column
+#print(na_count)
+```
+
+------------------------------------------------------------------------
+
+```{r}
+collisions_clean = read_xlsx("collisions_clean_4.9.25_3.xlsx")
+```
+
+This step concludes the Missing Values. Rebuilding the table from earlier to confirm no NAs remain.
+
+```{r}
+num_of_records = nrow(collisions_clean)
+num_of_features = ncol(collisions_clean) 
+data_summary = as.data.frame(matrix(nrow=num_of_features,ncol = 3))
+
+colnames(data_summary) = c("Features", "Missing Values", "% of Missing Values")
+
+data_summary[ ,1] = colnames(collisions_clean)
+
+for(i in 1:num_of_features){
+  data_summary[i,2] = sum(is.na(collisions_clean[,i])) #counting the number of missing values in each cust_info attribute
+  data_summary[i,3] = round(100*(sum(is.na(collisions_clean[,i])/num_of_records)),2) #turning the count into a percentage
+}
+
+print(data_summary)
+```
+
+## Data Inconsistencies
+
+#### Contributing Factors
+
+This step was completed manually in excel. As it was shown in the Exploratory Analysis above Factor 1 only had 55 unique values. When the geomapping was complete we worked completed these steps on the excel file that was produced. We began extracting just factor 1 and factor 2 into its own spreadsheet and putting the columns ontop of eachother in one column, leaving an empty cell between them to distingish between the two. Then using conditional formatting we highlighted all duplicate items. There it showed that all values in factor 2 were shared with factor 1. From there we looked through the 55 values and determined they could be bined into 3 groups, unsafe driving, driving conditions, and unspecified. We only kept unspecified because there were to many records with this value to remove. We went through the list and labeled each factor as one of the 3 groups. Then in the full dataset excel file we filtered by the original factors and dragged the new label down through the column. We saved this to the excel sheet below.
+
+```{r}
+collisions_clean = read_xlsx("collisions_clean_4.9.25_4.xlsx")
+```
+
+Looking at the classes within the FACTOR columns.
+
+The class "none" created by the Handling NA section for Factor 2 was kept, as this means the crashes only had one Factor that caused the accident instead of two.
+
+```{r}
+table(collisions_clean$CONTRIBUTING.FACTOR.VEHICLE.1)
+table(collisions_clean$CONTRIBUTING.FACTOR.VEHICLE.2)
+```
+
+Looking at the count of 'unspecified' in CONTRIBUTING.FACTOR.VEHICLE.2, it accounts for 60% of the column. Because over half of the column does not provide significant information, we will go ahead and remove it.
+
+```{r}
+#removing CONTRIBUTING.FACTOR.VEHICLE.2
+collisions_clean <- collisions_clean[ , -8]
+head
+```
+
+#### Vehicle Type
+
+In our exploratory analysis we saw that the most frequency vehicle captured was a sedan. We wanted to take a closer look at any vehicles with sedan listed in the name.
+
+```{r}
+sum(grepl("sedan", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+sum(grepl("sedan", collisions_clean$VEHICLE.TYPE.CODE.2, ignore.case = TRUE))
+```
+
+There are 204288 sedans captured in VEHICLE.TYPE.CODE.1 and 121967 in VEHICLE.TYPE.CODE.2. This covers almost 50% of our data.
+
+When viewing the dataset we also saw a lot of Sport Utility Vehicles (SUV) listed.
+
+```{r}
+sum(grepl("Sport Utility Vehicle", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+sum(grepl("Sport Utility Vehicle", collisions_clean$VEHICLE.TYPE.CODE.2, ignore.case = TRUE))
+```
+
+There are 154288 SUVs captured in VEHICLE.TYPE.CODE.1 and 91710 in VEHICLE.TYPE.CODE.2. This covers over 35% of our data.
+
+Together sedan and SUVs make up over 80% of our data.
+
+We looked at other vehicles like trucks and motorbikes, but they did not represented a very large portion of the data.
+
+```{r}
+#finding trucks
+sum(grepl("truck", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+sum(grepl("flat bed", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+
+#Motorcycle and Bike
+sum(grepl("motorcycle", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+sum(grepl("bike", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE)) 
+sum(grepl("moped", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE)) 
+sum(grepl("scoot", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+
+#Vans
+sum(grepl("van", collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE))
+```
+
+Because these other vehicles do not stand out on there own very strong, we decided to put them in another group called others.
+
+So there will be three groups used for modeling - sedans, SUVs, and other.
+
+Converting the classes of VEHICLE.TYPE.CODE.1
+
+```{r}
+#VEHICLE.TYPE.CODE.1
+#SUV
+collisions_clean$VEHICLE.TYPE.CODE.1 <- ifelse(grepl("Sport Utility Vehicle", 
+            collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE),
+            "SUV", collisions_clean$VEHICLE.TYPE.CODE.1)
+#sedan
+collisions_clean$VEHICLE.TYPE.CODE.1 <- ifelse(grepl("sedan", 
+                                                     collisions_clean$VEHICLE.TYPE.CODE.1, ignore.case = TRUE),
+                                               "Sedan", collisions_clean$VEHICLE.TYPE.CODE.1)
+
+#Other
+collisions_clean$VEHICLE.TYPE.CODE.1 <- ifelse(
+  !(collisions_clean$VEHICLE.TYPE.CODE.1 %in% c("SUV", "Sedan")),
+  "Other",
+  collisions_clean$VEHICLE.TYPE.CODE.1
+)
+```
+
+Looking at counts and percentages for VEHICLE.TYPE.CODE.1
+
+```{r}
+table(collisions_clean$VEHICLE.TYPE.CODE.1)
+round(prop.table(table(collisions_clean$VEHICLE.TYPE.CODE.1))*100, digits = 1)
+```
+
+Converting the classes of VEHICLE.TYPE.CODE.2
+
+```{r}
+#VEHICLE.TYPE.CODE.2
+#SUV
+collisions_clean$VEHICLE.TYPE.CODE.2 <- ifelse(grepl("Sport Utility Vehicle", 
+            collisions_clean$VEHICLE.TYPE.CODE.2, ignore.case = TRUE),
+            "SUV", collisions_clean$VEHICLE.TYPE.CODE.2)
+#sedan
+collisions_clean$VEHICLE.TYPE.CODE.2 <- ifelse(grepl("sedan", 
+                                                     collisions_clean$VEHICLE.TYPE.CODE.2, ignore.case = TRUE),
+                                               "Sedan", collisions_clean$VEHICLE.TYPE.CODE.2)
+
+#Other
+collisions_clean$VEHICLE.TYPE.CODE.2 <- ifelse(
+  !(collisions_clean$VEHICLE.TYPE.CODE.2 %in% c("SUV", "Sedan", "none")),
+  "Other",
+  collisions_clean$VEHICLE.TYPE.CODE.2
+)
+```
+
+Looking at counts and percentages for VEHICLE.TYPE.CODE.2
+
+```{r}
+table(collisions_clean$VEHICLE.TYPE.CODE.2)
+round(prop.table(table(collisions_clean$VEHICLE.TYPE.CODE.2))*100, digits = 1)
+```
+
+Note that the "none" class created in the NA section is kept here. It means that only 1 vehicle was involved in the crash.
+
+#### Injured/Killed
+
+For these values we just want to make sure no negatives or decimal numbers.
+
+```{r}
+#looking at the range of the columns
+range(collisions_clean$NUMBER.OF.PERSONS.INJURED)
+range(collisions_clean$NUMBER.OF.PERSONS.KILLED)
+```
+
+No negatives present.
+
+```{r}
+any(collisions_clean$NUMBER.OF.PERSONS.INJURED %% 1 != 0)
+any(collisions_clean$NUMBER.OF.PERSONS.KILLED %% 1 != 0)
+```
+
+No decimals present. So we will move forward with these columns as is.
+
+#### Zipcode
+
+When researching zipcodes we found that the range of zip codes in New York City primarily covers 10001-104xx and 11004-114xx, and 116xx series throughout the 5 boroughs.
+
+```{r}
+range(collisions_clean$ZIP.CODE)
+```
+
+We did find 1 Zipcode outside this range, 10000. We confirmed this was not a valid zipcode in the US. For ease of analysis we filtered our excel spreadsheet by this zipcode and found they were all tied to Manhattan. This makes sense as Manhattan starts at 10001. So we will be changing 10000 to 10001.
+
+```{r}
+collisions_clean$ZIP.CODE[collisions_clean$ZIP.CODE == 10000] <- 10001
+range(collisions_clean$ZIP.CODE)
+```
+
+Now the zipcodes appear in the proper range.
+
+#### Borough
+
+We should have 5 boroughs - Manhattan, Brooklyn, Queens, The Bronx, and Staten Island
+
+```{r}
+table(collisions_clean$BOROUGH)
+round(prop.table(table(collisions_clean$BOROUGH))*100, digits = 1)
+```
+
+We can see only the 5 boroughs present. We will move forward as is.
+
+We can also see from the table above that most of these collisions are occurring in Brooklyn, while Staten island has the least amount of crashes.
+
+#### Date/Time
+
+The data type for our Date and Time is POSIX. We want to keep this data type to further analyze these variables. However POSIX does not allow a time only variable. This is why we are seeing the prefix of 1899-12-31 infront of the times when we import the data. To fix this we found that we need to merge the two columns. To do this we need to get rid of the 1899-12-31, turning the columns into characters eliminates 1899-12-31.
+
+```{r}
+head(collisions_clean[ , c("CRASH.DATE","CRASH.TIME")])
+collisions_clean$CRASH.TIME <- format(collisions_clean$CRASH.TIME, "%H:%M:%S")
+collisions_clean$CRASH.DATE <- format(collisions_clean$CRASH.DATE, "%Y-%m-%d")
+head(collisions_clean[ , c("CRASH.DATE","CRASH.TIME")])
+```
+
+We can see the 1899-12-31 has now been remove. Now to merge and change back to POSIX
+
+```{r}
+collisions_clean$CRASH.DATETIME <- as.POSIXct(
+  paste(collisions_clean$CRASH.DATE, collisions_clean$CRASH.TIME),
+  format = "%Y-%m-%d %H:%M:%S",
+  tz = "UTC"
+)
+head(collisions_clean[ , c("CRASH.DATE","CRASH.TIME","CRASH.DATETIME")])
+```
+
+We can see that the date and times are now merged and match the inital columns, so now we will remove the separate date and time columns.
+
+```{r}
+collisions_clean <- collisions_clean[ , -(1:2)]
+```
+
+This concludes the data inconsistency section. All variables have been checked. We have binned columns with large amounts of unique variables. We have merged columns that to maintain proper data types. As well as checked numeric values to make sure no negatives or decimals present.
+
+## Feature Engineering
+
+In our analysis we would like to predict crash severity. To do this we need to create labels that specify how severe a crash is. Currently we just have numbers of how many people were effected.
+
+To create our labels, we want to make 3 classes of severity - Low, Moderate, and High.
+
+Low will consist of no injuries and no fatalities.
+
+Moderate will consist of 1 to 3 injuries and no fatalities.
+
+High will consist of more than 3 injuries and at least one fatality.
+
+Creating the code below as an IF statement, showing that if there are no injuries or fatalities to fall in the Low bin, if 1-3 injuries but no fatalities fall in the Moderate bin, and if there are more than 3 injuries and/or fatalities greater than 0, fall in the High bin.
+
+```{r}
+collisions_clean$SEVERITY.CLASS <- ifelse(
+  collisions_clean$NUMBER.OF.PERSONS.INJURED == 0 & collisions_clean$NUMBER.OF.PERSONS.KILLED == 0, "Low",
+  ifelse(
+    collisions_clean$NUMBER.OF.PERSONS.INJURED >= 1 & collisions_clean$NUMBER.OF.PERSONS.INJURED <= 3 & collisions_clean$NUMBER.OF.PERSONS.KILLED == 0, "Moderate",
+    "High"
+  )
+)
+```
+
+Checking the class balance of our labels. As we saw in the exploratory analysis, we have a high number of crashes where no one was effected, and the injury levels are generally on the lower side. Because of this we do expect some class imbalance.
+
+```{r}
+table(collisions_clean$SEVERITY.CLASS)
+round(prop.table(table(collisions_clean$SEVERITY.CLASS))*100, digits = 1)
+```
+
+This is about what we expected. About 64% of our crashes are low risk, 35% is moderate risk, and only 1% is high risk.
+
+We will be considering these class imbalances in our next steps to create training and testing sets for our models. We will be utilizing strategic sampling methods to best level out all classes.
+
+Now we have clean data and ready for next steps in our analysis.
+
+## Further Exploration
+
+Now that we have clean data, we want to analyze some of our features further. In the next steps we will tackle imbalanced data by stratified sampling long with under sampling of the larger classes of Low and Moderate to match the amount of High records. Since this will cause further reduction in records, we want to look at additional information before doing so.
+
+#### Time analysis
+
+Breaking down the time variable to further analyze.
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+#Using lubridate package to break down the time variables.
+install.packages("lubridate", repos = "https://cran.rstudio.com/")
+library(lubridate)
+```
+
+```{r}
+
+# Extract parts of the date
+collisions_Time <- collisions_clean
+collisions_Time$year <- year(collisions_clean$CRASH.DATETIME)
+collisions_Time$month <- month(collisions_clean$CRASH.DATETIME, label = TRUE)
+collisions_Time$weekday <- wday(collisions_clean$CRASH.DATETIME, label = TRUE)
+collisions_Time$hour <- hour(collisions_clean$CRASH.DATETIME)
+```
+
+Counting the amount of collisions per time frame
+
+```{r}
+# Collisions per year
+yearly_counts <- count(collisions_Time, year) #uses dplyr and creates a separate df with two columns
+
+# Collisions per weekday
+weekday_counts <- count(collisions_Time, weekday)
+
+# Collisions per month
+monthly_counts <- count(collisions_Time, month)
+
+#collisions per hour
+hourly_counts <- count(collisions_Time, hour) #between 4pm and 5pm is when most crashes occur
+
+print(yearly_counts)
+print(weekday_counts)
+print(monthly_counts)
+print(hourly_counts)
+```
+
+Graphing the counts
+
+```{r}
+library(ggplot2)
+
+# By year
+ggplot(yearly_counts, aes(x = year, y = n)) +
+  geom_col(fill = "blue") +
+  labs(title = "Collisions per Year", y = "Count", x = "Year")
+
+# By weekday
+ggplot(weekday_counts, aes(x = weekday, y = n)) +
+  geom_col(fill ="red") +
+  labs(title = "Collisions by Day of the Week", y = "Count", x = "Weekday")
+
+# By month
+ggplot(monthly_counts, aes(x = month, y = n)) +
+  geom_col(fill = "darkgreen") +
+  labs(title = "Collisions per Month", y = "Count", x = "Month")
+
+#by hour
+ggplot(hourly_counts, aes(x = hour, y = n)) +
+  geom_col(fill = "darkorange") +
+  labs(title = "General Collisions per hour", y = "Count", x = "hour")
+```
+
+Now to see when specifically High severity collisions occur
+
+```{r}
+#filtering only the High classes to analyze
+High_Time <- filter(collisions_Time,  SEVERITY.CLASS == "High")
+
+#month
+ggplot(High_Time, aes(x = month)) +
+  geom_bar(fill = "red") +
+  labs(title = "High Severity Collisions by Month", x = "Month", y = "Count")
+
+#weekday
+ggplot(High_Time, aes(x = weekday)) +
+  geom_bar(fill = "blue") +
+  labs(title = "High Severity Collisions by weekday", x = "weekday", y = "Count")
+
+#hour
+ggplot(High_Time, aes(x = hour)) +
+  geom_bar(fill = "darkgreen") +
+  labs(title = "High Severity Collisions by hour", x = "hour", y = "Count")
+
+#Trend of high severity crashes over time
+yearly_High_counts <- count(High_Time, year)
+
+ggplot(yearly_High_counts, aes(x = year, y = n)) +
+     geom_line(color = "red") +
+    geom_smooth(color = "blue") +
+    labs(title = "High Severity Collisions Over Time",
+          x = "Year",
+          y = "Count")
+
+```
+
+#### Vehicle Type
+
+What type of cars were most common in total collisions
+
+```{r}
+round(prop.table(table(collisions_clean$VEHICLE.TYPE.CODE.1))*100, digits = 1)
+round(prop.table(table(collisions_clean$VEHICLE.TYPE.CODE.2))*100, digits = 1)
+```
+
+What type of cars where most involved with High severity collisions
+
+```{r}
+High_collisions <- filter(collisions_clean,  SEVERITY.CLASS == "High")
+round(prop.table(table(High_collisions$VEHICLE.TYPE.CODE.1))*100, digits = 1)
+round(prop.table(table(High_collisions$VEHICLE.TYPE.CODE.2))*100, digits = 1)
+```
+
+#### Contributing Factors
+
+Looking at the table of contributing factors for both total collisions and high severity collisions
+
+```{r}
+#total collisions
+round(prop.table(table(collisions_clean$CONTRIBUTING.FACTOR.VEHICLE.1))*100, digits = 1)
+```
+
+```{r}
+#high severity collisions
+round(prop.table(table(High_collisions$CONTRIBUTING.FACTOR.VEHICLE.1))*100, digits = 1)
+```
+
+Visualizing the data
+
+```{r}
+ggplot(High_collisions, aes(x = CONTRIBUTING.FACTOR.VEHICLE.1)) +
+  geom_bar(fill = "blue") +
+  labs(title = "High Severity Collisions by Contributing Factor", x = "Factor", y = "Count")
+```
+
+## Handling the imbalanced data
+
+As seen in the above section as well as our exploratory analysis we saw that our target variable is heavily imbalanced. Keeping this imbalance will likely through off future modeling. So we plan to stratify and under-sample to create our modeling data.
+
+We will keep all High severity crash records (5131), and bring the other classes, Low and Moderate, down to match the amount of records we have for High.
+
+Beginning with pulling the classes apart to stratify them individually creating a more simple and easy to follow processes.
+
+```{r}
+#splitting the classes their own dataframe
+high_class   <- collisions_clean %>% filter(SEVERITY.CLASS == "High")
+moderate_class <- collisions_clean %>% filter(SEVERITY.CLASS == "Moderate")
+low_class      <- collisions_clean %>% filter(SEVERITY.CLASS == "Low")
+```
+
+Beginning the under-sampling of Moderate and Low classes. The selection of records will be done randomly, 5131 of each will be picked.
+
+```{r}
+# Sampling Moderate and Low classes
+set.seed(123)  # for reproducibility
+moderate_sample <- moderate_class %>% sample_n(5131)
+low_sample      <- low_class %>% sample_n(5131)
+```
+
+Now that the samples have been collected, we will combine them all back together.
+
+```{r}
+# Combining classes into a new balanced dataset for modeling
+collisions_balanced <- bind_rows(high_class, moderate_sample, low_sample)
+```
+
+Checking class balance of our model data.
+
+```{r}
+table(collisions_balanced$SEVERITY.CLASS)
+```
+
+We can see all classes now have the same amount of records!
+
+## Checking the balanced data's context
+
+We created the new modeling data by undersampling the majority classes randomly. We want to make sure that the new dataset holds about the same information as our original cleaned dataset.
+
+Reviewing the overall summary
+
+```{r}
+summary(collisions_balanced)
+```
+
+#### Boroughs
+
+Comparing borough class percentages between original cleaned data and balanced data.
+
+```{r}
+#original dataset
+round(prop.table(table(collisions_clean$BOROUGH))*100, digits = 1)
+#new dataset
+round(prop.table(table(collisions_balanced$BOROUGH))*100, digits = 1)
+```
+
+Both datasets have roughly the same distribution of borough classes.
+
+#### Zipcode
+
+Looking at the range of both datasets.
+
+```{r}
+#original dataset
+range(collisions_clean$ZIP.CODE)
+#new dataset
+range(collisions_balanced$ZIP.CODE)
+```
+
+Same range between both datasets.
+
+Looking at the number of unique values.
+
+```{r}
+sum(n_distinct(collisions_balanced$ZIP.CODE))
+```
+
+After some consideration for our planned models, there might be too many unique variables for kNN, Decision Tree, and Random Forest. We will keep this in mind going forward, possibly remove if needed.
+
+#### Number of persons injured or killed
+
+Since our target variable is derived from these two columns, we will remove them to avoid redundancy and prevent the model from simply learning their direct relationship, rather than underlying patterns.
+
+```{r}
+collisions_balanced <- collisions_balanced[ , -(3:4)]
+```
+
+columns NUMBER.OF.PERSONS.INJURED and NUMBER.OF.PERSONS.KILLED have been removed.
+
+#### Contributing factor
+
+Like the borough column we want to make sure the proportions match between datasets.
+
+```{r}
+#orignial data
+round(prop.table(table(collisions_clean$CONTRIBUTING.FACTOR.VEHICLE.1))*100, digits = 1)
+#new data
+round(prop.table(table(collisions_balanced$CONTRIBUTING.FACTOR.VEHICLE.1))*100, digits = 1)
+```
+
+The proportions between the datasets are very similar.
+
+#### Collision ID
+
+This has been kept to help if we needed to connect to any records for any reason, like how we did for the Geodata. However, we do not expect to need it again in the future as we are about to model. IDs do not offer much information in modeling since every value in unique.
+
+```{r}
+collisions_balanced <- collisions_balanced[ , -4]
+```
+
+Collision ID has been removed.
+
+#### Vehicle types
+
+we want to make sure the proportion of these classes match between datasets as well.
+
+Starting with Vehicle one
+
+```{r}
+#original data
+round(prop.table(table(collisions_clean$VEHICLE.TYPE.CODE.1))*100, digits = 1)
+
+#new data
+round(prop.table(table(collisions_balanced$VEHICLE.TYPE.CODE.1))*100, digits = 1)
+```
+
+Proportions are about the same between datasets.
+
+#### DATE/TIME
+
+Looking to see the new dataset covers roughly the same time are the original.
+
+```{r}
+#original dataset
+summary(collisions_balanced$CRASH.DATETIME)
+
+#new dataset
+summary(collisions_clean$CRASH.DATETIME)
+```
+
+Both datasets cover the full 4 years. Both Min values are 1/1/202. 1st quarters are both in 2021 only two months difference. Medians are both 2022 close in dates. Means are both in 2022 only 1 month apart. 3rd quarters also both in 2023 and only 1 month apart. Last Max of both are only one day difference.
+
+**We believe this new balanced dataset provided similar information as our original cleaned dataset, just on a smaller scale.**
+
+## Creating training, validation, and testing sets
+
+We want to randomly sample again to create our training, validation, and testing sets. We will divide the data 70% training, 15% validation, and 15% testing.
+
+Taking a similar approach like we did in lab 8 to randomly sample the data.
+
+```{r}
+#randomly divide the data into a 70/30 split. The 30 will be spilt more later
+num_of_rows <- nrow(collisions_balanced)
+collisions.train.num_rows <- num_of_rows*.70
+set.seed(123)
+collisions.sample <- sample(num_of_rows, collisions.train.num_rows)
+```
+
+Defining the Training set
+
+```{r}
+# 70% training data
+collisions_train <- collisions_balanced[collisions.sample, ]
+
+remaining_TV <-collisions_balanced[-collisions.sample, ]
+
+```
+
+Splitting the remaining data into validation and testing
+
+```{r}
+#splitting the remaining 30% further into validation and testing
+num_of_rows <- nrow(remaining_TV)
+collisions.val.num_rows <- num_of_rows*.50
+set.seed(123)
+collisions.sample2 <- sample(num_of_rows, collisions.val.num_rows)
+```
+
+Defining the Valdiation and Testing set.
+
+```{r}
+# 15% validation data
+collisions_validation <- remaining_TV[collisions.sample2, ]
+
+# 15% testing data
+collisions_test <- remaining_TV[-collisions.sample2, ]
+```
+
+Checking the proportions of the target class in these sets.
+
+```{r}
+#training
+round(prop.table(table(collisions_train$SEVERITY.CLASS))*100, digits = 1)
+#validation
+round(prop.table(table(collisions_validation$SEVERITY.CLASS))*100, digits = 1)
+#testing
+round(prop.table(table(collisions_test$SEVERITY.CLASS))*100, digits = 1)
+```
+
+The proportions of classes are very well distributed among the sets. We are ready for modeling. :)
+
+## Modeling
+
+### kNN
+
+To begin kNN we need to normalize the data.
+
+We will be turning the categorical variables into dummy variables, except for Zipcode.
+
+After some research we found that ZIP.CODE will be quite hard for kNN to process since it has 193 unique values. The two main options we saw were dummy variables or frequency of occurrence, other steps would require additional processing and possibly modeling for zipcodes. Since dummy variables would create 193 columns, frequency would assume a continuous/ordinal relationship, and we still have location information from borough, we have decided to drop zipcode for kNN.
+
+```{r}
+#dropping ZIP.CODE
+collisions_train_kNN <- collisions_train[ , -2]
+collisions_validation_kNN <- collisions_validation[ , - 2]
+collisions_test_kNN <- collisions_test[ , - 2]
+```
+
+Turning other category variables into dummy variables.
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+#installing fast dummies for easy creation of dummy variables.
+install.packages("fastDummies", repos = "https://cran.rstudio.com/")
+library(fastDummies)
+```
+
+```{r,warning=FALSE}
+#Borough
+collisions_train_kNN <- dummy_cols(collisions_train_kNN, select_columns = "BOROUGH")
+collisions_validation_kNN <- dummy_cols(collisions_validation_kNN, select_columns = "BOROUGH")
+collisions_test_kNN <- dummy_cols(collisions_test_kNN, select_columns = "BOROUGH")
+
+#Contributing factor
+collisions_train_kNN <- dummy_cols(collisions_train_kNN, select_columns = "CONTRIBUTING.FACTOR.VEHICLE.1")
+collisions_validation_kNN <- dummy_cols(collisions_validation_kNN, select_columns = "CONTRIBUTING.FACTOR.VEHICLE.1")
+collisions_test_kNN <- dummy_cols(collisions_test_kNN, select_columns = "CONTRIBUTING.FACTOR.VEHICLE.1")
+
+#Vehicle type 1
+collisions_train_kNN <- dummy_cols(collisions_train_kNN, select_columns = "VEHICLE.TYPE.CODE.1")
+collisions_validation_kNN <- dummy_cols(collisions_validation_kNN, select_columns = "VEHICLE.TYPE.CODE.1")
+collisions_test_kNN <- dummy_cols(collisions_test_kNN, select_columns = "VEHICLE.TYPE.CODE.1")
+
+#vehicle type 2
+collisions_train_kNN <- dummy_cols(collisions_train_kNN, select_columns = "VEHICLE.TYPE.CODE.2")
+collisions_validation_kNN <- dummy_cols(collisions_validation_kNN, select_columns = "VEHICLE.TYPE.CODE.2")
+collisions_test_kNN <- dummy_cols(collisions_test_kNN, select_columns = "VEHICLE.TYPE.CODE.2")
+```
+
+All dummy variables have been created
+
+For date/time data we will be turning this variable into a numeric type. When converting POSIX into numeric, it gives us a big number that represents that specific time-stamp. Specifically, it counts the number of seconds from POSIX's start date of 1/1/1970. By using this method it creates a natural scale.
+
+Since we have 3 sets, training, validation, and testing we need to make sure the they are all on the same scale. Thankfully we only have 1 numeric variable to worry about. Since we have dummy variables with values of either 0 or 1, we will use the min/max method to have all columns stay within the range. This ensures that the normalization across all sets is consistent. Using the training set's range also helps the model handle any values in the validation or test sets that fall outside of the training range.
+
+```{r}
+#Coverting the date/time to numeric (seconds)
+collisions_train_kNN$CRASH.DATETIME <- as.numeric(collisions_train_kNN$CRASH.DATETIME)
+collisions_validation_kNN$CRASH.DATETIME <- as.numeric(collisions_validation_kNN$CRASH.DATETIME)
+collisions_test_kNN$CRASH.DATETIME <- as.numeric(collisions_test_kNN$CRASH.DATETIME)
+
+#Setting the MIN and MIX of the training set
+min_dt <- min(collisions_train_kNN$CRASH.DATETIME)
+max_dt <- max(collisions_train_kNN$CRASH.DATETIME)
+
+#Normalizing all sets with min/max
+collisions_train_kNN$CRASH.DATETIME <- (collisions_train_kNN$CRASH.DATETIME - min_dt) / (max_dt - min_dt)
+collisions_validation_kNN$CRASH.DATETIME <- (collisions_validation_kNN$CRASH.DATETIME - min_dt) / (max_dt - min_dt)
+collisions_test_kNN$CRASH.DATETIME <- (collisions_test_kNN$CRASH.DATETIME - min_dt) / (max_dt - min_dt)
+
+
+#looking at the range of the datasets
+range(collisions_train_kNN$CRASH.DATETIME)
+range(collisions_validation_kNN$CRASH.DATETIME)
+range(collisions_test_kNN$CRASH.DATETIME)
+```
+
+Time has now been normalized across all sets
+
+All columns have been normalized, except our target variable. When we created the dummy variables, the original variables were left behind, we can now delete those.
+
+```{r}
+#looking at the before
+head(collisions_train_kNN)
+```
+
+```{r}
+#removing the first 4 variables, the ones that were dummy coded
+collisions_train_kNN <- collisions_train_kNN[ , -(1:4)]
+collisions_validation_kNN <- collisions_validation_kNN[ , -(1:4)]
+collisions_test_kNN <- collisions_test_kNN[ , -(1:4)]
+```
+
+```{r}
+#looking at the after
+head(collisions_train_kNN)
+```
+
+For the target variable, similar to lab 1, it should not be normalized, but moved to its own object and factored for model prediction labels.
+
+```{r}
+#training
+train_labels_kNN <- factor(collisions_train_kNN[[2]]) #storing training labels
+collisions_train_kNN <- collisions_train_kNN[ , -2] #removing from training set
+
+#validation
+validation_labels_kNN <- factor(collisions_validation_kNN[[2]]) #storing validation labels
+collisions_validation_kNN <- collisions_validation_kNN[ , -2] #removing from validation set
+
+#test
+test_labels_kNN <- factor(collisions_test_kNN[[2]]) #storing test labels
+collisions_test_kNN <- collisions_test_kNN[ , -2] #removing from test set
+
+#confirming levels
+levels(train_labels_kNN)
+```
+
+Now our data is ready for modeling. For our first K value we will use the squareroot of the number of records and pick the closest odd number. The squareroot of 10775 records is 103. This is quite large, but we will see how it performs, and tune from there.
+
+#### kNN Model 1
+
+Installing the needed library
+
+```{r}
+library(class)
+```
+
+Creating the model and predictions.
+
+```{r}
+kNNpred1 <- knn(train = collisions_train_kNN, test = collisions_validation_kNN, cl = train_labels_kNN, k = 103)
+```
+
+To evaluate our model, we will be using the confusionMatrix() from the package caret. It will show stats such as accuracy, precision, and more. We will then use caret to further tune our model.
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+install.packages("caret", repos = "https://cran.rstudio.com/")
+library(caret)
+```
+
+```{r}
+confusionMatrix(data = kNNpred1,
+                            reference = validation_labels_kNN,
+                            positive = "High")
+```
+
+The model with a K of 103, does not appear to perform very well. With an accuracy of 46%, this is lower than chance. Sensitivity to correctly identify positive class "High" is a little better at 62%.
+
+After trying a few K values we found that K=90 works the best for this method. Although still not much stronger.
+
+```{r}
+#K=90
+kNNpred2 <- knn(train = collisions_train_kNN, test = collisions_validation_kNN, cl = train_labels_kNN, k = 90)
+
+confusionMatrix(data = kNNpred2,
+                            reference = validation_labels_kNN,
+                            positive = "High")
+```
+
+K=90 increases accuracy and sensitivity by about 1%
+
+#### kNN Model 2
+
+Now lets try the caret method from lab 8.
+
+For this method, we have to add the target variables back to the datasets for the function to work.
+
+```{r}
+#training
+collisions_train_kNNc <- collisions_train_kNN #making a copy of the training set for caret
+collisions_train_kNNc$SEVERITY.CLASS <- train_labels_kNN #adding labels back to train set
+
+#validation
+collisions_validation_kNNc <- collisions_validation_kNN #making a copy of the validation set
+collisions_validation_kNNc$SEVERITY.CLASS <- validation_labels_kNN #adding labels back to validation
+```
+
+```{r}
+set.seed(300)
+kNNm2 <- train(SEVERITY.CLASS~., data = collisions_train_kNNc, method = "knn")
+kNNm2
+```
+
+K=9 was selected as the best model, but the accuracy and kappa are very low. Seeing how it predicts.
+
+```{r}
+set.seed(300)
+kNNpred3 = predict(kNNm2, collisions_validation_kNNc)
+confusionMatrix(data = kNNpred3,
+                            reference = collisions_validation_kNNc$SEVERITY.CLASS,
+                            positive = "High")
+```
+
+As expected performance is very poor, this is our worst model yet.
+
+Lets try tuning the model.
+
+#### kNN Model 3
+
+setting the control
+
+```{r}
+ctrl = trainControl(method = "cv", number = 10, sampling = "up", selectionFunction = "oneSE")
+```
+
+setting the grid
+
+```{r}
+grid = expand.grid(.k= c(9,50,75,90,103,110))
+```
+
+Adding weights to our positive class in the hopes of the model being able to predict "High" severity better.
+
+```{r}
+weights = ifelse(collisions_train_kNNc$SEVERITY.CLASS == 'High', 3, 1)
+
+```
+
+Finding the best model
+
+```{r}
+set.seed(300)
+kNNm3 = train(SEVERITY.CLASS ~ ., 
+                       data = collisions_train_kNNc, 
+                       method = "knn", 
+                       metric = "Accuracy", 
+                       trControl = ctrl,
+                       weights = weights,
+                       tuneGrid = grid )
+kNNm3
+```
+
+Model still is not producing get stats. Predicting to see overall performance
+
+```{r}
+set.seed(300)
+kNNpred4 = predict(kNNm3, collisions_validation_kNNc)
+confusionMatrix(data = kNNpred4,
+                            reference = collisions_validation_kNNc$SEVERITY.CLASS,
+                            positive = "High")
+```
+
+This model is a little better than last, but overall, still pretty terrible. Weights where unfortunately not very helpful.
+
+#### Testing kNN
+
+Best performing model was K=90, we will use it to test.
+
+```{r}
+kNNpredtest <- knn(train = collisions_train_kNN, test = collisions_test_kNN, cl = train_labels_kNN, k = 90)
+
+confusionMatrix(data = kNNpredtest,
+                            reference = test_labels_kNN,
+                            positive = "High")
+```
+
+Our testing model performed a little worse than the training and validation, but not by much.
+
+## Boosting
+
+As the kNN models are all underperforming at the same level, it appears to be an issue of underfitting. Our model might be too simple. To handle underfitting, we can use a more complex algorithm to try to better predict our data.
+
+The regular boosting() function was attempted, but we could not get it to complete calibration. We try different variations and even let it run for 12 hours at one point and it would not finalize. So we decided to use caret's boosting model "gbm"
+
+```{r}
+#copying training and validation to alter for gmb, leaving orignial intact
+collisions_train_bo <- collisions_train
+collisions_validation_bo <- collisions_validation
+
+#factoring our target variable, needed for gbm
+collisions_train_bo$SEVERITY.CLASS <- as.factor(collisions_train_bo$SEVERITY.CLASS)
+collisions_validation_bo$SEVERITY.CLASS <- as.factor(collisions_validation_bo$SEVERITY.CLASS)
+
+#creating the model, using methods from hw 8.
+ctrl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+grid = expand.grid(n.trees = 25, interaction.depth = 3, shrinkage = .1,  n.minobsinnode = 10 )
+set.seed(300)
+
+modelbo = train(SEVERITY.CLASS ~ ., 
+                data = collisions_train_bo, 
+                method = "gbm",
+                metric = "Accuracy",
+                trControl = ctrl,
+                tuneGrid = grid)
+
+#predicting
+predbo = predict(modelbo, collisions_validation_bo)
+confusionMatrix(data = predbo,
+                reference = collisions_validation_bo$SEVERITY.CLASS,
+                positive = "High")
+```
+
+The number of trees 25,50, 60, and 100 where tested. 25 produced the best performance, though they are all still pretty consistent with the kNN models performances.
+
+#### Boosting Model 2
+
+Looking at the confusion matrix, it looks like the model is having trouble deciphering between the target classes. So we attempted a simpler target class of either Severe or non-Severe.
+
+```{r}
+#binary switch
+# Convert to binary classes, training 
+collisions_train_bo$SEVERITY.CLASS <- ifelse(
+  collisions_train_bo$SEVERITY.CLASS == "High", 
+  "Severe", 
+  "Non-Severe"
+)
+
+#resetting factor
+collisions_train_bo$SEVERITY.CLASS <- factor(
+  collisions_train_bo$SEVERITY.CLASS,
+  levels = c("Severe", "Non-Severe")  # "Severe" comes first here
+)
+
+#validation
+collisions_validation_bo$SEVERITY.CLASS <- ifelse(
+  collisions_validation_bo$SEVERITY.CLASS == "High", 
+  "Severe", 
+  "Non-Severe"
+)
+#resetting factor
+collisions_validation_bo$SEVERITY.CLASS <- factor(
+  collisions_validation_bo$SEVERITY.CLASS,
+  levels = c("Severe", "Non-Severe")  # "Severe" comes first here
+)
+```
+
+```{r}
+table(collisions_train_bo$SEVERITY.CLASS)
+```
+
+While there is some class imbalance with this method, the class imbalance is not too severe. We will add "smote" sampling to the model to help as well.
+
+Trying the gbm model again to see if there are any improvements.
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 5, sampling = "smote")
+
+set.seed(300)
+modelbo2 = train(SEVERITY.CLASS ~ ., 
+                data = collisions_train_bo, 
+                method = "gbm",
+                metric = "Accuracy",
+                trControl = ctrl,
+                tuneGrid = grid)
+
+#predicting
+predbo2 = predict(modelbo2, collisions_validation_bo)
+confusionMatrix(data = predbo2,
+                reference = collisions_validation_bo$SEVERITY.CLASS,
+                positive = "Severe")
+```
+
+While this did greatly improve our accuracy, it came at the cost of all other metrics. Note the no-information rate being .6713, and then accuracy is .6436, so this model does not offer any additional information further than labeling all observations as the majority class.
+
+#### Testing best Boosting model
+
+Out of the boosting models created, the first model performed the best. Lets test it on the testing data
+
+```{r}
+collisions_test_bo <- collisions_test
+collisions_test_bo$SEVERITY.CLASS <- as.factor(collisions_test_bo$SEVERITY.CLASS)
+
+#predicting
+predbo = predict(modelbo, collisions_test_bo)
+confusionMatrix(data = predbo,
+                reference = collisions_test_bo$SEVERITY.CLASS,
+                positive = "High")
+
+```
+
+All training, validation, and testing performed similary. Testing model is mildy lower.
+
+## Decision Tree
+
+Use objects: ***collisions_balanced, collisions_train, collisions_validation, and collisions_test***
+
+------------------------------------------------------------------------
+
+We are building classification models to predict SEVERITY.CLASS (Low, Moderate, High) using our balanced dataset. We will use both the C5.0 and rpart decision tree algorithms and evaluate them on validation and test sets.
+
+------------------------------------------------------------------------
+
+### Convert Target to Factor and Ensure Consistent Levels
+
+We need to convert SEVERITY.CLASS to a factor because R requires classification models to use factors for the target variable so they know it is a category. We also need to make sure the levels in SEVERITY.CLASS are the same in the training, validation, and test sets. This helps avoid errors and makes sure the model understands all class labels.
+
+```{r}
+# Create Decision Tree-specific version of the balanced dataset
+collisions_balanced_d_tree <- collisions_balanced
+
+# Ensure SEVERITY.CLASS is a factor
+collisions_balanced_d_tree$SEVERITY.CLASS <- factor(collisions_balanced_d_tree$SEVERITY.CLASS)
+
+levels_all <- levels(collisions_balanced_d_tree$SEVERITY.CLASS)
+
+collisions_train_d_tree <- collisions_train
+collisions_validation_d_tree <- collisions_validation
+collisions_test_d_tree <- collisions_test
+
+# Apply consistent levels using the levels from the Decision Tree dataset
+collisions_train_d_tree$SEVERITY.CLASS <- factor(collisions_train_d_tree$SEVERITY.CLASS, levels = levels_all)
+collisions_validation_d_tree$SEVERITY.CLASS <- factor(collisions_validation_d_tree$SEVERITY.CLASS, levels = levels_all)
+collisions_test_d_tree$SEVERITY.CLASS <- factor(collisions_test_d_tree$SEVERITY.CLASS, levels = levels_all)
+```
+
+#### Model 1: Decision Tree Using C5.0
+
+Building a decision tree is using C50. This model was more recently created and is known to have better performance than rpart. However, it does not offer a data visualization function.
+
+```{r}
+# Load libraries
+library(caret)
+library(C50)
+
+# Set seed for reproducibility
+set.seed(300)
+```
+
+We use the C50 package and train() from caret to build a basic C5.0 decision tree.
+
+```{r, warning=FALSE}
+# Train a default C5.0 decision tree
+collisions_d_tree_c50 <- train(SEVERITY.CLASS ~ ., 
+                               data = collisions_train, 
+                               method = "C5.0")
+```
+
+Viewing our model through summary.
+
+```{r}
+cat(head(capture.output(summary(collisions_d_tree_c50)), 30), sep = "\n") 
+
+# Only showing first 30 lines to prevent a very long markdown.
+```
+
+This output shows that a C5.0 decision tree model was built to predict the variable outcome using 10,775 records and 14 features. During model training, five less useful features were automatically removed through a process called winnowing. The model used a single decision tree (not boosted), and no rule-based output was generated. It applied moderate pruning with a confidence factor of 0.25 and required at least two cases per leaf. Early stopping was enabled to avoid overfitting. The most influential variables in predicting the outcome included vehicle types such as sedans and SUVs, particularly those listed as the second vehicle, along with unsafe driving as a contributing factor and the boroughs Brooklyn and Queens.
+
+#### Evaluate C5.0 on Validation Set
+
+We predict on the validation set and evaluate with a confusion matrix.
+
+```{r}
+# Predict
+pred_c50_val <- predict(collisions_d_tree_c50, collisions_validation_d_tree)
+
+# Match factor levels
+pred_c50_val <- factor(pred_c50_val, levels = levels(collisions_validation_d_tree$SEVERITY.CLASS))
+
+# Confusion matrix
+conf_c50_val <- confusionMatrix(pred_c50_val, collisions_validation_d_tree$SEVERITY.CLASS)
+print(conf_c50_val)
+```
+
+The model correctly predicted about 45.1% of cases, which is better than random guessing (33.6%), and this improvement is statistically significant. The confusion matrix reveals that the model predicts "High" severity more accurately than "Low" or "Moderate." Sensitivity is highest for "High" (72.3%) but very low for "Low" (17.6%), indicating poor detection of "Low" severity cases. The Kappa value of 0.1785 suggests only slight agreement beyond chance. Overall, the model performs moderately and could be improved with further tuning or different modeling approaches.
+
+#### Final Evaluation of C5.0 on Test Set
+
+```{r}
+# Predict on test set
+pred_c50_test <- predict(collisions_d_tree_c50, collisions_test_d_tree)
+pred_c50_test <- factor(pred_c50_test, levels = levels(collisions_test_d_tree$SEVERITY.CLASS))
+
+# Confusion matrix
+conf_c50_test <- confusionMatrix(pred_c50_test, collisions_test_d_tree$SEVERITY.CLASS)
+print(conf_c50_test)
+```
+
+The model's performance on the test set is similar to the validation set, with an overall accuracy of 45%, which is better than random guessing (33.65%). The confusion matrix shows that the model predicts "High" severity cases fairly well but struggles with "Low" severity. Sensitivity is 71.1% for "High" but only 16.0% for "Low," indicating poor detection of "Low" severity. The Kappa value is 0.1768, suggesting slight agreement beyond chance. Overall, the model's performance is moderate, and there's potential for improvement, especially in detecting "Low" severity cases.
+
+#### Model 2: Decision Tree Using rpart
+
+The reason for using this library is because it provides visualization of our decision tree.
+
+```{r}
+# Load library
+library(rpart)
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(300)
+
+# Train the decision tree model
+# This builds a basic decision tree using the training set.
+collisions_d_tree_rpart <- rpart(SEVERITY.CLASS ~ ., 
+                                 data = collisions_train_d_tree, 
+                                 method = "class")
+```
+
+### Visualize the Tree
+
+This provides a visual overview of the decision tree structure and the most important splits.
+
+```{r}
+# Load visualization package
+library(rpart.plot)
+
+# Plot the rpart tree
+rpart.plot(collisions_d_tree_rpart)
+```
+
+The decision tree first splits based on whether the second vehicle involved is a Sedan or SUV. If yes, it checks if the crash occurred after a certain date; newer crashes tend to be classified as High severity. If not a Sedan or SUV, the model looks at the contributing factor. If the factor is related to Driving Conditions or is Unspecified, the crash is likely Moderate severity. Otherwise, crashes are more often classified as Low severity.
+
+### View Tree Summary
+
+This shows more detailed information about the splits, nodes, and class probabilities.
+
+```{r}
+# Display the first few lines of the tree summary
+# Only showing first 30 lines to prevent a very long markdown.
+cat(head(capture.output(summary(collisions_d_tree_rpart)), 30), sep = "\n")
+```
+
+The decision tree was trained on 10,775 observations to classify SEVERITY.CLASS. The most important variable was VEHICLE.TYPE.CODE.2, followed by CONTRIBUTING.FACTOR.VEHICLE.1 and CRASH.DATETIME. The tree's initial split was based on vehicle type, and the predicted class at the root node was "High" with nearly even class distribution. The complexity parameter (CP) table shows that after three main splits, the relative error decreased from 1 to around 0.82. The model also identified surrogate splits, with CONTRIBUTING.FACTOR.VEHICLE.1 used as a backup when primary data is missing.
+
+### Evaluate rpart on Validation Set
+
+This helps assess how well the model performs on unseen validation data.
+
+```{r}
+# Predict on validation set
+pred_rpart_val <- predict(collisions_d_tree_rpart, 
+                          newdata = collisions_validation_d_tree, 
+                          type = "class")
+
+# Create confusion matrix
+conf_rpart_val <- confusionMatrix(pred_rpart_val, 
+                                  collisions_validation_d_tree$SEVERITY.CLASS)
+
+# Print results
+print(conf_rpart_val)
+
+```
+
+The model achieved an accuracy of 44.3%, which is better than random guessing (No Information Rate = 33.6%). The kappa value is 0.166, indicating poor agreement beyond chance. Sensitivity (true positive rate) is highest for the High class at 70%, but its precision (Positive Predictive Value) is only 45.5%, meaning many predictions are incorrect. The Low and Moderate classes have lower sensitivity (27% and 36%), showing the model struggles to correctly identify those cases. Overall, the model favors predicting "High" and performs moderately on class separation.
+
+### Final Evaluation of rpart on Test Set
+
+```{r}
+# Predict on test set
+pred_rpart_test <- predict(collisions_d_tree_rpart, 
+                           newdata = collisions_test_d_tree, 
+                           type = "class")
+
+# Create confusion matrix
+conf_rpart_test <- confusionMatrix(pred_rpart_test, 
+                                   collisions_test_d_tree$SEVERITY.CLASS)
+
+# Print results
+print(conf_rpart_test)
+```
+
+The decision tree achieved 45.99% accuracy on the test set, slightly better than random guessing (No Information Rate = 33.65%). The Kappa value of 0.1915 shows low agreement beyond chance. The model performs best on the High class, with 69% sensitivity, but only 44% precision, meaning many predictions are incorrect. Sensitivity is lower for Low (29%) and Moderate (40%) classes, indicating difficulty identifying those cases. Overall, the model tends to overpredict “High” severity, and though performance is slightly better than validation, class separation remains weak.
+
+The test set showed slightly better performance than the validation set, with accuracy increasing from 44.17% to 45.99% and kappa from 0.16 to 0.19. Sensitivity for High severity remained strong, while recall and precision for Low and Moderate classes improved. Overall, the model generalizes slightly better on unseen data but still favors predicting High severity.
+
+### Test Output Comparison: C5.0 versus rpart
+
+Both models performed similarly overall, with rpart achieving a slightly higher accuracy of 45.99% compared to 45% for C5.0, and a higher kappa value (0.1915 vs. 0.1768), suggesting slightly better agreement beyond chance. C5.0 had higher sensitivity for the High and Moderate classes but lower for Low. In contrast, rpart showed better balance across classes, with improved sensitivity for the Low class and slightly higher precision for High and Moderate. Overall, rpart offered a more balanced classification, while C5.0 was slightly stronger at identifying High severity crashes.
+
+So, if the goal is balanced performance across all classes, go with rpart. If the goal is about catching High severity crashes, then C5.0 might still be useful.
+
+## Model Improvements, Predictions, and Evaluation C5.0 and rpart
+
+### Improving rpart with smaller cp (less pruning).
+
+This may improve accuracy or recall for minority classes by allowing more splits. Be cautious of overfitting.
+
+```{r}
+# Train a more complex rpart tree
+collisions_d_tree_rpart_cp <- rpart(SEVERITY.CLASS ~ ., 
+                                    data = collisions_train_d_tree, 
+                                    method = "class", 
+                                    control = rpart.control(cp = 0.0005))
+
+# Predict on test set
+pred_rpart_cp <- predict(collisions_d_tree_rpart_cp, 
+                         newdata = collisions_test_d_tree, 
+                         type = "class")
+
+# Evaluate
+conf_rpart_cp <- confusionMatrix(pred_rpart_cp, collisions_test_d_tree$SEVERITY.CLASS)
+print(conf_rpart_cp)
+
+```
+
+The improved rpart model with a lower complexity parameter achieved 45.56% accuracy and a kappa of 0.1845, indicating modest agreement beyond chance. It performed best on the High severity class with a sensitivity of 60.3% and moderate precision. Performance on the Low and Moderate classes was lower but more balanced than before, with sensitivities around 38%. Balanced accuracy across all classes ranged from 57% to 61%, showing a slight improvement in handling class distribution.
+
+Compared to the original rpart test model, the more complex version slightly reduced accuracy from 45.99% to 45.56% and kappa from 0.1915 to 0.1845. The original model had higher sensitivity for the High class at 68.7%, while the updated version dropped to 60.3%. However, the new model improved sensitivity for the Low class from 29.5% to 38.5%, offering better balance. Precision remained similar across both models. While the original tree was slightly more accurate overall, the updated version provided a more even performance across severity classes, particularly improving detection of Low severity crashes.
+
+### Improving C5.0 with Boosting (trials)
+
+We can increase trials to apply boosting, helping the model learn from its previous mistakes.
+
+Boosting often improves accuracy but may still favor the dominant class unless addressed.
+
+```{r}
+# Load the C50 library
+library(C50)
+
+# Create predictor and target sets
+x_train_d_tree <- collisions_train_d_tree[, names(collisions_train_d_tree) != "SEVERITY.CLASS"]
+y_train_d_tree <- collisions_train_d_tree$SEVERITY.CLASS
+
+# Ensure all character columns are factors (C5.0 requires this)
+x_train_d_tree[] <- lapply(x_train_d_tree, function(x) if (is.character(x)) as.factor(x) else x)
+collisions_test_d_tree[] <- lapply(collisions_test_d_tree, function(x) if (is.character(x)) as.factor(x) else x)
+
+# Ensure target levels match
+collisions_test_d_tree$SEVERITY.CLASS <- factor(collisions_test_d_tree$SEVERITY.CLASS, levels = levels(y_train_d_tree))
+```
+
+```{r}
+# Remove CRASH.DATETIME from predictors
+x_train_d_tree <- x_train_d_tree[, names(x_train_d_tree) != "CRASH.DATETIME"]
+collisions_test_d_tree <- collisions_test_d_tree[, names(collisions_test_d_tree) != "CRASH.DATETIME"]
+
+# Train boosted model
+collisions_d_tree_c50_boost <- C5.0(x = x_train_d_tree, y = y_train_d_tree, trials = 20)
+
+# Predict on test set
+pred_c50_boost <- predict(collisions_d_tree_c50_boost, collisions_test_d_tree)
+
+# library(caret)  # in case it's not already loaded
+
+# Evaluate
+conf_c50_boost <- confusionMatrix(pred_c50_boost, collisions_test_d_tree$SEVERITY.CLASS)
+print(conf_c50_boost)
+```
+
+The boosted C5.0 model with 20 trials achieved 42.75% accuracy and a kappa of 0.1425, which is lower than the original and improved rpart models. Sensitivity was highest for the High class at 61.4%, but lower for Moderate and Low at 36.3% and 31.0%, respectively. Precision ranged from 41% to 45%, with overall performance leaning toward High severity predictions. Balanced accuracy across classes was moderate, between 55% and 60%. While boosting helped retain good detection for High severity crashes, it did not outperform the rpart models and showed reduced balance and accuracy overall.
+
+### Improving C5.0 with Cost Matrix
+
+To penalize certain misclassifications more heavily such as predicting High severity as Low, we define a cost matrix that assigns higher penalties to more serious errors. This shifts the model’s focus toward reducing costly misclassifications, improving practical performance even if overall accuracy stays the same.
+
+```{r}
+# Prepare predictor data (remove CRASH.DATETIME and ensure factors)
+x_cost_d_tree <- collisions_train_d_tree[, names(collisions_train_d_tree) != "SEVERITY.CLASS"]
+x_cost_d_tree <- x_cost_d_tree[, names(x_cost_d_tree) != "CRASH.DATETIME"]
+x_cost_d_tree[] <- lapply(x_cost_d_tree, function(x) if (is.character(x)) as.factor(x) else x)
+
+# Target variable
+y_cost_d_tree <- collisions_train_d_tree$SEVERITY.CLASS
+
+# Clean test set to match
+x_test_cost <- collisions_test_d_tree[, names(collisions_test_d_tree) != "CRASH.DATETIME"]
+x_test_cost[] <- lapply(x_test_cost, function(x) if (is.character(x)) as.factor(x) else x)
+collisions_test_d_tree$SEVERITY.CLASS <- factor(collisions_test_d_tree$SEVERITY.CLASS, levels = levels(y_cost_d_tree))
+
+# Define cost matrix (already done above)
+severity_levels <- levels(y_cost_d_tree)
+cost_matrix <- matrix(c(
+  0, 1, 2,
+  1, 0, 2,
+  2, 2, 0
+), nrow = 3, byrow = TRUE)
+dimnames(cost_matrix) <- list(predicted = severity_levels, actual = severity_levels)
+
+# Train cost-sensitive C5.0 model
+collisions_d_tree_c50_cost <- C5.0(x = x_cost_d_tree, y = y_cost_d_tree, costs = cost_matrix)
+
+# Predict and evaluate
+pred_c50_cost <- predict(collisions_d_tree_c50_cost, x_test_cost)
+conf_c50_cost <- confusionMatrix(pred_c50_cost, collisions_test_d_tree$SEVERITY.CLASS)
+print(conf_c50_cost)
+
+```
+
+The model achieved 43.01% accuracy and a kappa of 0.1466, which is slightly better than the boosted C5.0 model but still lower than both rpart models. It performed best on the High class with 63.1% sensitivity, while Low class detection improved to 38.5%. However, performance on the Moderate class dropped, with sensitivity at just 27.9%. Precision was consistent across all classes, around 43%. Balanced accuracy ranged from 54.9% to 60.8%. Overall, the cost matrix helped improve fairness between High and Low classes but reduced detection of Moderate crashes.
+
+The baseline rpart model achieved the highest accuracy at 45.99% with a kappa of 0.1915, showing strong sensitivity for High severity but weaker performance on Low and Moderate. After adjusting the complexity parameter, the improved rpart model showed slightly lower accuracy at 45.56% but improved balance, particularly for detecting Low severity crashes.
+
+The baseline C5.0 model performed similarly with 45.00% accuracy and kappa of 0.1768, favoring the High class. After applying boosting with 20 trials, accuracy dropped to 42.75% and kappa to 0.1425, with more emphasis on High severity but weaker balance overall. The cost-sensitive C5.0 model further shifted focus toward reducing severe misclassifications. It achieved 43.01% accuracy and kappa of 0.1466, improving Low class detection but reducing performance on Moderate.
+
+Overall, while no model significantly outperformed the others, the original rpart model remained the most accurate, and the cost-sensitive C5.0 model offered more balanced treatment of misclassifications aligned with real-world impact.
+
+## Random Forest
+
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+install.packages("irr", repos = "https://cran.rstudio.com/")
+install.packages("ROCR", repos = "https://cran.rstudio.com/")
+install.packages("randomForest", repos = "https://cran.rstudio.com/")
+library(irr)
+library(ROCR)
+library(randomForest)
+```
+
+### Model 3 Random Forest
+
+We assign RF label for Random Forest to the sample train, validate and test set so we don't alter the original samples when trying multiple models.
+
+```{r}
+collisions_trainRF <- collisions_train
+collisions_validationRF <- collisions_validation
+collisions_testRF <- collisions_test
+```
+
+Setting target variable as factor for the model to classify results.
+
+```{r}
+collisions_trainRF$SEVERITY.CLASS <- as.factor(collisions_trainRF$SEVERITY.CLASS)
+collisions_validationRF$SEVERITY.CLASS <- as.factor(collisions_validationRF$SEVERITY.CLASS)
+collisions_testRF$SEVERITY.CLASS <- as.factor(collisions_testRF$SEVERITY.CLASS)
+```
+
+Checking to make sure target variable is now a factor instead of a character.
+
+```{r}
+str(collisions_trainRF)
+```
+
+Now we are ready to run the model.
+
+```{r}
+set.seed(300)
+collisions_modelRF <- randomForest(SEVERITY.CLASS ~ ., data = collisions_trainRF)
+collisions_modelRF    #displaying model
+```
+
+Test the performance of the model on the test dataset.
+
+```{r}
+collisions_predRF <- predict(collisions_modelRF, collisions_testRF)
+head(collisions_predRF)
+```
+
+```{r}
+table(collisions_predRF, collisions_testRF$SEVERITY.CLASS)
+
+```
+
+```{r}
+results_RF <- confusionMatrix(data= collisions_predRF, 
+                            reference = collisions_testRF$SEVERITY.CLASS, 
+                             )
+results_RF
+```
+
+Accuracy for this model 3 is at 45% and from this we can conclude that the model might not be learning the patterns very well or there is and issue with imbalanced data. Imbalanced data can be ruled out since we checked and addressed imbalances prior to running the model. We need the model to do better than chance or 50% so we will fine turn the model. Before we start fine turning we lets look at other at other model metrics to gain more insight of the model performance.
+
+```{r}
+confusionMatrix(collisions_predRF, collisions_testRF$SEVERITY.CLASS)$byClass
+```
+
+The confusion matrix results further confirms why the accuracy is low. Its able to predict high severity but the precision is low indicating there are lots of false positives. The model struggles to find low severity and moderate severity performs slightly better than low but not as good as high.
+
+#### Model 3.1 Random Forest: Try adding Weights
+
+We are giving more importance to classes Low and Moderate to try to improve performance.
+
+```{r}
+set.seed(300)
+collisions_modelRF2 <- randomForest(SEVERITY.CLASS ~ ., data = collisions_trainRF, classwt = c(High = 1, Moderate = 1.5, Low = 2))
+collisions_modelRF2    #displaying model
+```
+
+Test the performance of the model on the test dataset.
+
+```{r}
+collisions_predRF2 <- predict(collisions_modelRF2, collisions_testRF)
+head(collisions_predRF2)
+```
+
+```{r}
+confusionMatrix(collisions_predRF2, collisions_testRF$SEVERITY.CLASS)
+```
+
+Unfortunately adding the weights did not improve accuracy. It actually decreased.
+
+We will tune the model to try to get better results with the first Random Forest model. Lets first check the parameters.
+
+```{r}
+modelLookup('rf')
+```
+
+We will change the mtry parameter by first setting the control
+
+```{r}
+rf_ctrl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE")
+```
+
+Creating the grid with an mtry of c(2,4,6,8)
+
+```{r}
+grid = expand.grid(.mtry = c(2, 4, 6, 8))
+grid
+```
+
+Lets fine tune.
+
+```{r}
+set.seed(300)
+
+modelrf <- train(
+  SEVERITY.CLASS ~ ., 
+  data = collisions_trainRF,   # training data set            
+  method = "rf",               # random forest
+  metric = "Kappa",            # performance metric to optimize
+  trControl = rf_ctrl,           # cross-validation settings
+  tuneGrid = grid             # grid of mtry values
+)
+
+modelrf
+```
+
+Model 4 is the best model.
+
+## Conclusion:
+
+All models performed very similarly, this could be a sign of the patterns in the data. It might possibly be difficult to distinguish crash severity from the information given. We could also be experiencing underfitting. Although when using boosting we would expect to see an increase in performance, but the output remained relatively the same. Even when turning turning the target variable as binary, it still ended up less useful than assigning all crashes to non-severe, the majority class. This data may not be appropriate for predicting crash severity, though it does still provide useful insights such as when most collisions occur and where as shown in the exploratory analysis. If we were to suggest a model, the decision tree C.50 performed the best out of all, giving slightly better than chance with an accuracy of .45, sensisitivty of .7111, and capturing 539 severe crashes correctly.
